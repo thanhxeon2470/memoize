@@ -13,6 +13,7 @@ defmodule Memoize.CacheStrategy do
   @callback invalidate() :: integer
   @callback invalidate(any) :: integer
   @callback garbage_collect() :: integer
+  @callback persistent() :: module
 
   # TODO: remove 2.0
   def configured?(mod) do

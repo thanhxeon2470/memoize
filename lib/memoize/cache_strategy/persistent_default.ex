@@ -1,27 +1,22 @@
-defmodule Memoize.CacheStrategy.Default do
+defmodule Memoize.CacheStrategy.Default.Persistent do
   @moduledoc false
 
   @behaviour Memoize.CacheStrategy
 
-  @ets_tab __MODULE__
-
   def init(opts) do
-    :ets.new(@ets_tab, [:public, :set, :named_table, {:read_concurrency, true}])
-
     # Default global settings
     #
     # config :memoize, Memoize.CacheStrategy.Default,
     #   expires_in: 1000
     expires_in =
-      Application.get_env(:memoize, __MODULE__, []) |> Keyword.get(:expires_in, :infinity)
+      Application.get_env(:memoize, Memoize.CacheStrategy.Default, []) |> Keyword.get(:expires_in, :infinity)
 
     opts = Keyword.put(opts, :expires_in, expires_in)
     opts
-    |> Memoize.CacheStrategy.Default.Persistent.init()
   end
 
   def tab(_key) do
-    @ets_tab
+    __MODULE__
   end
 
   def cache(_key, _value, opts) do
@@ -46,22 +41,35 @@ defmodule Memoize.CacheStrategy.Default do
   end
 
   def invalidate() do
-    :ets.select_delete(@ets_tab, [{{:_, {:completed, :_, :_}}, [], [true]}])
+    try do
+      :persistent_term.get()
+      |> Enum.each(fn {key, value} ->
+        value
+        |> case do
+          {_, {:completed, _, _}} ->
+            :persistent_term.erase(key)
+
+          _ ->
+            :ok
+        end
+      end)
+
+      1
+    rescue
+      _ ->
+        0
+    end
   end
 
   def invalidate(key) do
-    :ets.select_delete(@ets_tab, [{{key, {:completed, :_, :_}}, [], [true]}])
+    if :persistent_term.erase(key) do
+      1
+    else
+      0
+    end
   end
 
   def garbage_collect() do
-    expired_at = System.monotonic_time(:millisecond)
-
-    :ets.select_delete(@ets_tab, [
-      {{:_, {:completed, :_, :"$1"}},
-       [{:andalso, {:"/=", :"$1", :infinity}, {:<, :"$1", {:const, expired_at}}}], [true]}
-    ])
-  end
-  def persistent() do
-    __MODULE__.Persistent
+    1
   end
 end

@@ -1,9 +1,9 @@
-defmodule Memoize.CacheStrategy.Eviction do
+defmodule Memoize.CacheStrategy.Eviction.Persistent do
+  alias EEx.Engine
   @behaviour Memoize.CacheStrategy
 
-  @ets_tab __MODULE__
-  @read_history_tab Module.concat(__MODULE__, "ReadHistory")
-  @expiration_tab Module.concat(__MODULE__, "Expiration")
+  @read_history_persistent_tab Module.concat(__MODULE__, "ReadHistory")
+  @expiration_persistent_tab Module.concat(__MODULE__, "Expiration")
 
   defp max_threshold() do
     Memoize.Config.opts().max_threshold
@@ -14,11 +14,10 @@ defmodule Memoize.CacheStrategy.Eviction do
   end
 
   def init(opts) do
-    :ets.new(@ets_tab, [:public, :set, :named_table, {:read_concurrency, true}])
-    :ets.new(@read_history_tab, [:public, :set, :named_table, {:write_concurrency, true}])
-    :ets.new(@expiration_tab, [:public, :ordered_set, :named_table])
+    :ets.new(@read_history_persistent_tab, [:public, :set, :named_table, {:write_concurrency, true}])
+    :ets.new(@expiration_persistent_tab, [:public, :ordered_set, :named_table])
 
-    app_opts = Application.fetch_env!(:memoize, __MODULE__)
+    app_opts = Application.fetch_env!(:memoize, Memoize.CacheStrategy.Eviction)
     max_threshold = opts[:max_threshold] || Keyword.fetch!(app_opts, :max_threshold)
 
     opts = Keyword.put(opts, :max_threshold, max_threshold)
@@ -35,17 +34,17 @@ defmodule Memoize.CacheStrategy.Eviction do
       end
 
     opts
-    |> Memoize.CacheStrategy.Eviction.Persistent.init()
   end
 
   def tab(_key) do
-    @ets_tab
+    __MODULE__
   end
 
   def used_bytes() do
     words = 0
-    words = words + :ets.info(@ets_tab, :memory)
-    words = words + :ets.info(@read_history_tab, :memory)
+    # words = words + :ets.info(@ets_tab, :memory)
+    words = words + :persistent_term.info().memory
+    words = words + :ets.info(@read_history_persistent_tab, :memory)
 
     words * :erlang.system_info(:wordsize)
   end
@@ -67,7 +66,7 @@ defmodule Memoize.CacheStrategy.Eviction do
       {:ok, expires_in} ->
         expired_at = System.monotonic_time(:millisecond) + expires_in
         counter = System.unique_integer()
-        :ets.insert(@expiration_tab, {{expired_at, counter}, key})
+        :ets.insert(@expiration_persistent_tab, {{expired_at, counter}, key})
 
       :error ->
         :ok
@@ -81,22 +80,43 @@ defmodule Memoize.CacheStrategy.Eviction do
 
     unless context.permanent do
       counter = System.unique_integer([:monotonic, :positive])
-      :ets.insert(@read_history_tab, {key, counter})
+      :ets.insert(@read_history_persistent_tab, {key, counter})
     end
 
     if expired?, do: :retry, else: :ok
   end
 
   def invalidate() do
-    num_deleted = :ets.select_delete(@ets_tab, [{{:_, {:completed, :_, :_}}, [], [true]}])
-    :ets.delete_all_objects(@read_history_tab)
-    num_deleted
+    :persistent_term.get()
+    |> Enum.each(fn {key, value} ->
+      case value do
+        {:completed, :_, :_} ->
+          :persistent_term.erase(key)
+      end
+    end)
+
+    :ets.delete_all_objects(@read_history_persistent_tab)
+    1
   end
 
   def invalidate(key) do
-    num_deleted = :ets.select_delete(@ets_tab, [{{key, {:completed, :_, :_}}, [], [true]}])
-    :ets.select_delete(@read_history_tab, [{{key, :_}, [], [true]}])
-    num_deleted
+
+    :persistent_term.get(key, {})
+    |> case do
+      {^key, {:completed, :_, :_}} ->
+        :ets.select_delete(@read_history_persistent_tab, [{{key, :_}, [], [true]}])
+
+        if :persistent_term.erase(key) do
+          1
+        else
+          0
+        end
+
+      _ ->
+        0
+    end
+
+    # num_deleted
   end
 
   def garbage_collect() do
@@ -108,13 +128,19 @@ defmodule Memoize.CacheStrategy.Eviction do
         0
       else
         # remove values ordered by last accessed time until used bytes less than min_threshold().
-        values = :lists.keysort(2, :ets.tab2list(@read_history_tab))
+        values = :lists.keysort(2, :ets.tab2list(@read_history_persistent_tab))
         stream = values |> Stream.filter(fn n -> n != :permanent end) |> Stream.with_index(1)
 
         try do
           for {{key, _}, num_deleted} <- stream do
-            :ets.select_delete(@ets_tab, [{{key, {:completed, :_, :_}}, [], [true]}])
-            :ets.delete(@read_history_tab, key)
+
+            :persistent_term.get(key)
+            |> case do
+              {^key, {:completed, :_, :_}} ->
+                :persistent_term.erase(key)
+            end
+
+            :ets.delete(@read_history_persistent_tab, key)
 
             if used_bytes() <= min_threshold() do
               throw({:break, num_deleted})
@@ -130,12 +156,12 @@ defmodule Memoize.CacheStrategy.Eviction do
   end
 
   def clear_expired_cache(read_key \\ nil, expired? \\ false) do
-    case :ets.first(@expiration_tab) do
+    case :ets.first(@expiration_persistent_tab) do
       :"$end_of_table" ->
         expired?
 
       {expired_at, _counter} = key ->
-        case :ets.lookup(@expiration_tab, key) do
+        case :ets.lookup(@expiration_persistent_tab, key) do
           [] ->
             # retry
             clear_expired_cache(read_key, expired?)
@@ -145,7 +171,7 @@ defmodule Memoize.CacheStrategy.Eviction do
 
             if now > expired_at do
               invalidate(cache_key)
-              :ets.delete(@expiration_tab, key)
+              :ets.delete(@expiration_persistent_tab, key)
               expired? = expired? || cache_key == read_key
               # next
               clear_expired_cache(read_key, expired?)
@@ -155,8 +181,5 @@ defmodule Memoize.CacheStrategy.Eviction do
             end
         end
     end
-  end
-  def persistent() do
-    __MODULE__.Persistent
   end
 end
