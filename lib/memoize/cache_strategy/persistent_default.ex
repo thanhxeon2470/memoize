@@ -72,4 +72,8 @@ defmodule Memoize.CacheStrategy.Default.Persistent do
   def garbage_collect() do
     1
   end
+
+  def persistent() do
+    __MODULE__
+  end
 end

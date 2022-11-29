@@ -284,14 +284,17 @@ defmodule Memoize.Cache do
 
   def invalidate() do
     cache_strategy().invalidate()
+    cache_strategy().persistent().invalidate()
   end
 
   def invalidate(key) do
     key = normalize_key(key)
     cache_strategy().invalidate(key)
+    cache_strategy().persistent().invalidate(key)
   end
 
   def garbage_collect() do
     cache_strategy().garbage_collect()
+    cache_strategy().persistent().garbage_collect()
   end
 end

@@ -182,4 +182,7 @@ defmodule Memoize.CacheStrategy.Eviction.Persistent do
         end
     end
   end
+  def persistent() do
+    __MODULE__
+  end
 end
